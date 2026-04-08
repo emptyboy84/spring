@@ -1,6 +1,6 @@
 package com.example.demo; // ⚠️ 주의: 본인의 프로젝트 패키지 이름으로 맞춰주세요! (맨 윗줄 파일 참고)
 
-import java.net.http.HttpHeaders;
+
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
