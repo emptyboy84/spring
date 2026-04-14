@@ -15,13 +15,31 @@ public class SearchHistory {
    private String status;// 사업자상태
    private LocalDateTime searchDate;// 검색한시간
    private String companyName;// 회사이름
+   
+   // 신규 추가 필드
+   private String phone;
+   private String email;
+   private String homepage;
+   private Long revenue; // 매출액
+   private Integer employeeCount; // 인원수
+   private String address; // 회사 기본 주소
+   private String fax; // 팩스번호
+   private String industry; // 업종
 
    /* constructor */
-   public SearchHistory(String bizNumber, String status, String companyName) {
+   public SearchHistory(String bizNumber, String status, String companyName, String phone, String email, String homepage, Long revenue, Integer employeeCount, String address, String fax, String industry) {
       this.bizNumber = bizNumber;
       this.status = status;
       this.searchDate = LocalDateTime.now();// 저장할때 현재시간 자동입력
       this.companyName = companyName;
+      this.phone = phone;
+      this.email = email;
+      this.homepage = homepage;
+      this.revenue = revenue;
+      this.employeeCount = employeeCount;
+      this.address = address;
+      this.fax = fax;
+      this.industry = industry;
    }
 
 }

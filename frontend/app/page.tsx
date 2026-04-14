@@ -16,8 +16,8 @@ export default function Home() {
    const [selectedDetail, setSelectedDetail] = useState<any>(null);
 
    const handleSearch = async () => {
-      if (!bizNumber) {
-         alert("사업자등록번호를 입력해주세요!");
+      if (!bizNumber && !companyName) {
+         alert("사업자등록번호 또는 회사이름을 입력해주세요!");
          return;
       }
 
@@ -25,7 +25,11 @@ export default function Home() {
       setSelectedDetail(null); // 새로운 검색 시 팝업 닫기
 
       try {
-         const response = await fetch(`http://localhost:8080/api/company/status?bizNumber=${bizNumber}`);
+         const url = new URL("http://localhost:8080/api/company/status");
+         if (bizNumber) url.searchParams.append("bizNumber", bizNumber);
+         if (companyName) url.searchParams.append("companyName", companyName);
+
+         const response = await fetch(url.toString());
 
          if (!response.ok) {
             const errorText = await response.text();
@@ -117,7 +121,7 @@ export default function Home() {
                               두 이름이 다르므로 괄호 안에 '자동확인'이라고 표시해주는 로직입니다. */}
                               {officialName === companyName ? "" : <span className="ml-2 text-gray-500">(자동확인)</span>}
                            </td>
-                           <td className="p-4 border-b">{result.data[0].b_no}</td>
+                           <td className="p-4 border-b">{result.data[0].formatted_bno || result.data[0].b_no}</td>
                            <td className="p-4 border-b">
                               <span className={`px-3 py-1 rounded-full text-sm font-bold ${result.data[0].b_stt === '계속사업자' //계속사업자이면 파란색, 아니면 빨간색
                                  ? 'bg-blue-100 text-blue-700'
@@ -160,7 +164,7 @@ export default function Home() {
 
                      <p className="flex justify-between">
                         <span className="font-semibold text-gray-500">사업자번호</span>
-                        <span className="font-bold">{selectedDetail.b_no}</span>
+                        <span className="font-bold">{selectedDetail.formatted_bno || selectedDetail.b_no}</span>
                      </p>
 
                      <p className="flex justify-between">
@@ -180,6 +184,66 @@ export default function Home() {
                            <span className="font-bold text-red-600">{selectedDetail.end_dt}</span>
                         </p>
                      )}
+
+                     {/* 추가된 확장 데이터 표시 영역 */}
+                     <div className="border-t border-gray-200 pt-4 mt-4 space-y-3">
+                        <h3 className="text-gray-400 font-semibold text-xs mb-2">상세 확인 정보</h3>
+                        
+                        {selectedDetail.industry && (
+                           <p className="flex justify-between items-start gap-4">
+                              <span className="font-semibold text-gray-500 whitespace-nowrap">업종(업태)</span>
+                              <span className="font-bold text-gray-800 text-right">{selectedDetail.industry}</span>
+                           </p>
+                        )}
+                        {selectedDetail.address && (
+                           <p className="flex justify-between items-start gap-4">
+                              <span className="font-semibold text-gray-500 whitespace-nowrap">상세 주소</span>
+                              <span className="font-bold text-gray-800 text-right">{selectedDetail.address}</span>
+                           </p>
+                        )}
+                        {selectedDetail.phone && (
+                           <p className="flex justify-between items-center">
+                              <span className="font-semibold text-gray-500">연락처</span>
+                              <span className="font-bold text-blue-600">{selectedDetail.phone}</span>
+                           </p>
+                        )}
+                        {selectedDetail.fax && (
+                           <p className="flex justify-between items-center">
+                              <span className="font-semibold text-gray-500">팩스 번호</span>
+                              <span className="font-bold text-gray-700">{selectedDetail.fax}</span>
+                           </p>
+                        )}
+                        {selectedDetail.email && (
+                           <p className="flex justify-between items-center">
+                              <span className="font-semibold text-gray-500">메일 주소</span>
+                              <span className="font-bold text-gray-800">{selectedDetail.email}</span>
+                           </p>
+                        )}
+                        {selectedDetail.homepage && (
+                           <p className="flex justify-between items-center">
+                              <span className="font-semibold text-gray-500">홈페이지</span>
+                              <a href={selectedDetail.homepage} target="_blank" rel="noreferrer" className="font-bold text-blue-500 underline truncate max-w-[200px] hover:text-blue-700">
+                                 {selectedDetail.homepage}
+                              </a>
+                           </p>
+                        )}
+                        {selectedDetail.revenue && (
+                           <p className="flex justify-between items-center">
+                              <span className="font-semibold text-gray-500">최근 1년 매출액</span>
+                              <span className="font-bold text-green-700">
+                                 {Number(selectedDetail.revenue).toLocaleString()} 원
+                              </span>
+                           </p>
+                        )}
+                        {selectedDetail.employeeCount && (
+                           <p className="flex justify-between items-center">
+                              <span className="font-semibold text-gray-500">직원수(국민연금)</span>
+                              <span className="font-bold text-purple-700">
+                                 {Number(selectedDetail.employeeCount).toLocaleString()} 명
+                              </span>
+                           </p>
+                        )}
+                     </div>
                   </div>
 
                   <button
