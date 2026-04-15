@@ -51,8 +51,11 @@ export default function Home() {
 
       // 회사명만 있으면 검색 목록 조회
       try {
-         const url = `http://localhost:8080/api/company/search?q=${encodeURIComponent(companyName)}`;
-         const response = await fetch(url);
+         //const url = `http://localhost:8080/api/company/search?q=${encodeURIComponent(companyName)}`;
+         const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+         const response = await fetch(`${API_URL}/api/company/status?bizNumber=${bizNumber}`);
+
+         //const response = await fetch(url);
          const data = await response.json();
 
          setSearchQuery(companyName);
@@ -189,11 +192,10 @@ export default function Home() {
                               </td>
                               <td className="p-3">
                                  {item.bstt && (
-                                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
-                                       item.bstt === '계속사업자'
+                                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${item.bstt === '계속사업자'
                                           ? 'bg-blue-100 text-blue-700'
                                           : 'bg-red-100 text-red-700'
-                                    }`}>
+                                       }`}>
                                        {item.bstt}
                                     </span>
                                  )}
@@ -304,7 +306,7 @@ export default function Home() {
                      {/* 추가된 확장 데이터 표시 영역 */}
                      <div className="border-t border-gray-200 pt-4 mt-4 space-y-3">
                         <h3 className="text-gray-400 font-semibold text-xs mb-2">상세 확인 정보</h3>
-                        
+
                         <p className="flex justify-between items-start gap-4">
                            <span className="font-semibold text-gray-500 whitespace-nowrap">업종(업태)</span>
                            <span className={`font-bold text-right ${selectedDetail.industry ? 'text-gray-800' : 'text-gray-300 italic'}`}>
