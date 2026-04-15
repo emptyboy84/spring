@@ -38,5 +38,7 @@ out/
 
 ### 보안 (API 키 및 DB 비밀번호 유출 방지) ###
 src/main/resources/application.properties
-application.properties
 
+#파일 깃허브에 안올라감
+application.properties
+application-secret.properties
