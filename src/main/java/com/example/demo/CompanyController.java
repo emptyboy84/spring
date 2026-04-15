@@ -100,6 +100,9 @@ public class CompanyController {
    // 🚀 회사명 -> DART 고유번호 매핑용 메모리 장부
    private java.util.Map<String, String> companyNameToCorpCodeMap = new java.util.concurrent.ConcurrentHashMap<>();
 
+   // 🏭 고용산재보험 CSV: 사업자등록번호 -> [상시근로자수, 주소, 업종명, 사업장명]
+   private java.util.Map<String, String[]> insuranceDataMap = new java.util.concurrent.ConcurrentHashMap<>();
+
    // 💡 DB 통신 창구를 불러옵니다. (메소드 바깥인 클래스 레벨 필드로 선언하여 의존성 주입을 받아야 합니다)
    @Autowired
    private SearchHistoryRepository searchHistoryRepository;
@@ -136,6 +139,115 @@ public class CompanyController {
       } catch (Exception e) {
          System.out.println("❌ DART 고유번호 다운로드 실패: " + e.getMessage());
       }
+   }
+
+   // 🏭 서버 시작 시 고용산재보험 CSV(200만 사업장)를 메모리에 적재합니다.
+   @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+   public void initInsuranceData() {
+      System.out.println("고용산재보험 CSV 데이터 로딩 시작...");
+      String csvDir = System.getProperty("user.dir") + "/src/main/resources/insurance";
+      java.io.File dir = new java.io.File(csvDir);
+      if (!dir.exists() || !dir.isDirectory()) {
+         System.out.println("⚠️ insurance 디렉토리 없음: " + csvDir);
+         return;
+      }
+      int loadedCount = 0;
+      for (java.io.File csvFile : dir.listFiles((d, name) -> name.endsWith(".csv"))) {
+         try (java.io.BufferedReader br = new java.io.BufferedReader(
+               new java.io.InputStreamReader(new java.io.FileInputStream(csvFile), "CP949"))) {
+            String line = br.readLine(); // 헤더 스킵
+            while ((line = br.readLine()) != null) {
+               try {
+                  // CSV 파싱: 연번,보험구분,사업장명,우편번호,주소,업종코드,업종명,산재성립,...,산재근로자수,고용근로자수,...,사업자등록번호,관리번호
+                  String[] cols = line.split(",", -1);
+                  if (cols.length >= 14) {
+                     String bizNo = cols[13].trim(); // 사업자등록번호
+                     if (bizNo.isEmpty()) continue;
+                     String empCount = cols[10].trim(); // 고용보험 상시근로자수 (산재보다 정확)
+                     if (empCount.isEmpty()) empCount = cols[9].trim(); // 산재보험 근로자수 폴백
+                     String addr = cols[4].trim();
+                     String bizType = cols[6].trim(); // 업종명
+                     String compName = cols[2].trim(); // 사업장명
+                     // 기존에 더 큰 근로자수가 있으면 덮어쓰지 않음 (같은 사업자번호로 여러 사업장 가능)
+                     insuranceDataMap.merge(bizNo, new String[]{empCount, addr, bizType, compName},
+                           (existing, newVal) -> {
+                              int existEmp = 0, newEmp = 0;
+                              try { existEmp = Integer.parseInt(existing[0]); } catch (Exception e) {}
+                              try { newEmp = Integer.parseInt(newVal[0]); } catch (Exception e) {}
+                              return (newEmp > existEmp) ? newVal : existing;
+                           });
+                     loadedCount++;
+                  }
+               } catch (Exception e) {
+                  // 개별 행 파싱 실패 무시
+               }
+            }
+         } catch (Exception e) {
+            System.out.println("CSV 파일 읽기 실패: " + csvFile.getName() + " - " + e.getMessage());
+         }
+      }
+      System.out.println("✅ 고용산재보험 CSV 로딩 완료! (총 " + insuranceDataMap.size() + "개 사업장, " + loadedCount + "행 처리)");
+   }
+
+   // ====================================================================
+   // 🔍 회사명 검색 API - 비즈노에서 관련 회사 목록 전부 반환
+   // ====================================================================
+   @GetMapping("/search")
+   public ResponseEntity<?> searchCompanies(@RequestParam String q) {
+      String query = (q != null) ? q.trim() : "";
+      if (query.isEmpty()) {
+         Map<String, String> err = new HashMap<>();
+         err.put("error", "검색어를 입력해주세요.");
+         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(err);
+      }
+
+      RestTemplate restTemplate = new RestTemplate();
+      ObjectMapper objectMapper = new ObjectMapper();
+      java.util.List<Map<String, String>> resultList = new java.util.ArrayList<>();
+
+      try {
+         // 비즈노 gb=3 (상호명 검색) - 최대 10건 반환
+         String biznoSearchUrl = "https://www.bizno.net/api/fapi?key=" + BIZNO_API_KEY + "&gb=3&q=" + query
+               + "&type=json";
+         ResponseEntity<String> searchRes = restTemplate.getForEntity(biznoSearchUrl, String.class);
+         JsonNode searchRoot = objectMapper.readTree(searchRes.getBody());
+
+         if (searchRoot.has("items") && searchRoot.get("items").isArray()) {
+            for (JsonNode item : searchRoot.get("items")) {
+               if (item == null || item.isNull()) continue;
+               Map<String, String> company = new HashMap<>();
+               company.put("company", item.hasNonNull("company") ? item.get("company").asText().trim() : "");
+               String bno = item.hasNonNull("bno") ? item.get("bno").asText().trim() : "";
+               company.put("bno", bno);
+               company.put("ceo", item.hasNonNull("ceo") ? item.get("ceo").asText().trim() : "");
+               company.put("address", item.hasNonNull("address") ? item.get("address").asText().trim() : "");
+               company.put("biz_type", item.hasNonNull("biz_type") ? item.get("biz_type").asText().trim() : "");
+               company.put("tel", item.hasNonNull("tel") ? item.get("tel").asText().trim() : "");
+               company.put("bstt", item.hasNonNull("bstt") ? item.get("bstt").asText().trim() : "");
+               // 보험 CSV에서 근로자수 보완
+               String cleanBno = bno.replace("-", "").trim();
+               if (!cleanBno.isEmpty() && insuranceDataMap.containsKey(cleanBno)) {
+                  String[] insData = insuranceDataMap.get(cleanBno);
+                  company.put("employeeCount", insData[0]);
+                  if (company.get("address").isEmpty() && !insData[1].isEmpty())
+                     company.put("address", insData[1]);
+                  if (company.get("biz_type").isEmpty() && !insData[2].isEmpty())
+                     company.put("biz_type", insData[2]);
+               }
+               if (!company.get("company").isEmpty()) {
+                  resultList.add(company);
+               }
+            }
+         }
+      } catch (Exception e) {
+         System.out.println("회사명 검색 실패: " + e.getMessage());
+      }
+
+      Map<String, Object> response = new HashMap<>();
+      response.put("query", query);
+      response.put("count", resultList.size());
+      response.put("items", resultList);
+      return ResponseEntity.ok(response);
    }
 
    // @RequestParam을 지워도 String 같은 기본 데이터 타입이면 알아서 맵핑 해줍니다.
@@ -220,27 +332,28 @@ public class CompanyController {
          try {
             ResponseEntity<String> biznoRes = restTemplate.getForEntity(biznoUrl, String.class);
             JsonNode biznoRoot = objectMapper.readTree(biznoRes.getBody());
+            System.out.println("[DEBUG] 비즈노 API 응답: " + biznoRes.getBody());
 
             if (biznoRoot.has("items") && biznoRoot.get("items").isArray() && biznoRoot.get("items").size() > 0) {
                JsonNode firstItem = biznoRoot.get("items").get(0);
-               if (firstItem.hasNonNull("company")) {
+               if (firstItem.hasNonNull("company") && !firstItem.get("company").asText().isBlank()) {
                   realCompanyName = firstItem.get("company").asText();
-               } else if (firstItem.hasNonNull("company_name")) {
+               } else if (firstItem.hasNonNull("company_name") && !firstItem.get("company_name").asText().isBlank()) {
                   realCompanyName = firstItem.get("company_name").asText();
                }
 
-               if (firstItem.hasNonNull("tel"))
-                  phone = firstItem.get("tel").asText();
-               if (firstItem.hasNonNull("email"))
-                  email = firstItem.get("email").asText();
-               if (firstItem.hasNonNull("fax"))
-                  fax = firstItem.get("fax").asText();
-               if (firstItem.hasNonNull("address"))
-                  address = firstItem.get("address").asText();
-               if (firstItem.hasNonNull("biz_type"))
-                  industry = firstItem.get("biz_type").asText();
-               if (firstItem.hasNonNull("homepage"))
-                  homepage = validateUrlExistance(firstItem.get("homepage").asText());
+               if (firstItem.hasNonNull("tel") && !firstItem.get("tel").asText().isBlank())
+                  phone = firstItem.get("tel").asText().trim();
+               if (firstItem.hasNonNull("email") && !firstItem.get("email").asText().isBlank())
+                  email = firstItem.get("email").asText().trim();
+               if (firstItem.hasNonNull("fax") && !firstItem.get("fax").asText().isBlank())
+                  fax = firstItem.get("fax").asText().trim();
+               if (firstItem.hasNonNull("address") && !firstItem.get("address").asText().isBlank())
+                  address = firstItem.get("address").asText().trim();
+               if (firstItem.hasNonNull("biz_type") && !firstItem.get("biz_type").asText().isBlank())
+                  industry = firstItem.get("biz_type").asText().trim();
+               if (firstItem.hasNonNull("homepage") && !firstItem.get("homepage").asText().isBlank())
+                  homepage = validateUrlExistance(firstItem.get("homepage").asText().trim());
 
             }
 
@@ -279,32 +392,130 @@ public class CompanyController {
             System.out.println("비즈노 API 호출 실패 (상호명 조회 실패): " + e.getMessage());
          }
 
-         // ====================================================================
-         // 2.5 DART 연동 (우리가 받아둔 고유번호 메모리 장부를 통해 매출액 추적!)
-         // ====================================================================
-         String checkName = realCompanyName.replace("(주)", "").replace("주식회사", "").replace(" ", "").trim();
-         if (companyNameToCorpCodeMap.containsKey(checkName)) {
-            String corpCode = companyNameToCorpCodeMap.get(checkName);
+         System.out.println(
+               "[DEBUG] 비즈노 gb=1 결과 -> 회사명:" + realCompanyName + " 전화:" + phone + " 주소:" + address + " 업종:" + industry);
 
-            // 💰 1) [DART 매출액 조회] (단일회사 주요계정: 11011 사업보고서, CFS 연결재무제표)
-            String dartFnUrl = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=" + DART_API_KEY
-                  + "&corp_code=" + corpCode + "&bsns_year=" + bsnsYear + "&reprt_code=11011&fs_div=CFS";
+         // ====================================================================
+         // 2.3 비즈노 gb=3 (상호명 검색) - gb=1에서 못 가져온 상세정보(전화,주소,업종 등) 보완
+         // ====================================================================
+         if (!"이름미상".equals(realCompanyName) && phone.isEmpty() && address.isEmpty()) {
             try {
-               ResponseEntity<String> dartRes = restTemplate.getForEntity(dartFnUrl, String.class);
-               JsonNode dartRoot = objectMapper.readTree(dartRes.getBody());
-               if (dartRoot.has("status") && "000".equals(dartRoot.get("status").asText()) && dartRoot.has("list")) {
-                  for (JsonNode item : dartRoot.get("list")) {
-                     if ("매출액".equals(item.get("account_nm").asText())) {
-                        String amt = item.get("thstrm_amount").asText().replaceAll(",", "");
-                        if (!amt.isEmpty())
-                           revenue = Long.parseLong(amt);
+               String biznoNameUrl = "https://www.bizno.net/api/fapi?key=" + BIZNO_API_KEY + "&gb=3&q="
+                     + java.net.URLEncoder.encode(realCompanyName, "UTF-8") + "&type=json";
+               ResponseEntity<String> biznoNameRes = restTemplate.getForEntity(biznoNameUrl, String.class);
+               JsonNode biznoNameRoot = objectMapper.readTree(biznoNameRes.getBody());
+               System.out.println("[DEBUG] 비즈노 gb=3 상세조회 응답: " + biznoNameRes.getBody());
+
+               if (biznoNameRoot.has("items") && biznoNameRoot.get("items").isArray()) {
+                  // 사업자번호가 일치하는 항목을 찾아야 함
+                  for (JsonNode item : biznoNameRoot.get("items")) {
+                     if (item == null || item.isNull())
+                        continue;
+                     String itemBno = item.hasNonNull("bno") ? item.get("bno").asText().replace("-", "").trim() : "";
+                     if (itemBno.equals(cleanBizNumber)) {
+                        System.out.println("[DEBUG] 비즈노 gb=3에서 사업자번호 매칭 항목 발견!");
+                        if (phone.isEmpty() && item.hasNonNull("tel") && !item.get("tel").asText().isBlank())
+                           phone = item.get("tel").asText().trim();
+                        if (email.isEmpty() && item.hasNonNull("email") && !item.get("email").asText().isBlank())
+                           email = item.get("email").asText().trim();
+                        if (fax.isEmpty() && item.hasNonNull("fax") && !item.get("fax").asText().isBlank())
+                           fax = item.get("fax").asText().trim();
+                        if (address.isEmpty() && item.hasNonNull("address") && !item.get("address").asText().isBlank())
+                           address = item.get("address").asText().trim();
+                        if (industry.isEmpty() && item.hasNonNull("biz_type")
+                              && !item.get("biz_type").asText().isBlank())
+                           industry = item.get("biz_type").asText().trim();
+                        if ((homepage == null || homepage.isEmpty()) && item.hasNonNull("homepage")
+                              && !item.get("homepage").asText().isBlank())
+                           homepage = validateUrlExistance(item.get("homepage").asText().trim());
+                        if (ceo.isEmpty() && item.hasNonNull("ceo") && !item.get("ceo").asText().isBlank())
+                           ceo = item.get("ceo").asText().trim();
                         break;
                      }
                   }
                }
             } catch (Exception e) {
-               System.out.println("DART 매출액 확인 실패: " + e.getMessage());
+               System.out.println("비즈노 gb=3 상세조회 실패 (무시 가능): " + e.getMessage());
             }
+            System.out.println(
+                  "[DEBUG] 비즈노 gb=3 보완 후 -> 전화:" + phone + " 주소:" + address + " 업종:" + industry + " 대표:" + ceo);
+         }
+
+         // ====================================================================
+         // 2.5 DART 연동 (우리가 받아둔 고유번호 메모리 장부를 통해 매출액 추적!)
+         // ====================================================================
+         String checkName = realCompanyName.replace("(주)", "").replace("주식회사", "").replace(" ", "").trim();
+         System.out.println(
+               "[DEBUG] DART 매핑 시도: '" + checkName + "' -> 존재여부: " + companyNameToCorpCodeMap.containsKey(checkName));
+         if (companyNameToCorpCodeMap.containsKey(checkName)) {
+            String corpCode = companyNameToCorpCodeMap.get(checkName);
+            System.out.println("[DEBUG] DART 고유번호 발견: " + corpCode);
+
+            // 💰 1) [DART 매출액 조회] - 사업보고서 → 반기 → 분기 순 폴백, CFS → OFS 폴백
+            String[] reprtCodes = {"11011", "11012", "11014", "11013"}; // 사업보고서, 반기, 3분기, 1분기
+            String[] fsDivs = {"CFS", "OFS"}; // 연결재무제표 → 별도재무제표
+            String foundReprtCode = null; // 성공한 보고서 코드 기억용
+
+            for (String reprtCode : reprtCodes) {
+               if (revenue != null) break;
+               for (String fsDiv : fsDivs) {
+                  if (revenue != null) break;
+                  String dartFnUrl = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=" + DART_API_KEY
+                        + "&corp_code=" + corpCode + "&bsns_year=" + bsnsYear + "&reprt_code=" + reprtCode + "&fs_div=" + fsDiv;
+                  try {
+                     ResponseEntity<String> dartRes = restTemplate.getForEntity(dartFnUrl, String.class);
+                     JsonNode dartRoot = objectMapper.readTree(dartRes.getBody());
+                     if (dartRoot.has("status") && "000".equals(dartRoot.get("status").asText()) && dartRoot.has("list")) {
+                        for (JsonNode item : dartRoot.get("list")) {
+                           if ("매출액".equals(item.get("account_nm").asText())) {
+                              String amt = item.get("thstrm_amount").asText().replaceAll(",", "");
+                              if (!amt.isEmpty()) {
+                                 revenue = Long.parseLong(amt);
+                                 foundReprtCode = reprtCode;
+                                 System.out.println("[DEBUG] DART 매출액 발견! (reprt=" + reprtCode + ", fs=" + fsDiv + ", 년도=" + bsnsYear + ")");
+                              }
+                              break;
+                           }
+                        }
+                     }
+                  } catch (Exception e) {
+                     // 개별 조합 실패는 무시하고 다음 조합 시도
+                  }
+               }
+            }
+
+            // 2024년 매출액 없으면 2023년으로 한번 더 시도
+            if (revenue == null && "2024".equals(bsnsYear)) {
+               for (String reprtCode : reprtCodes) {
+                  if (revenue != null) break;
+                  for (String fsDiv : fsDivs) {
+                     if (revenue != null) break;
+                     String dartFnUrl = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=" + DART_API_KEY
+                           + "&corp_code=" + corpCode + "&bsns_year=2023&reprt_code=" + reprtCode + "&fs_div=" + fsDiv;
+                     try {
+                        ResponseEntity<String> dartRes = restTemplate.getForEntity(dartFnUrl, String.class);
+                        JsonNode dartRoot = objectMapper.readTree(dartRes.getBody());
+                        if (dartRoot.has("status") && "000".equals(dartRoot.get("status").asText()) && dartRoot.has("list")) {
+                           for (JsonNode item : dartRoot.get("list")) {
+                              if ("매출액".equals(item.get("account_nm").asText())) {
+                                 String amt = item.get("thstrm_amount").asText().replaceAll(",", "");
+                                 if (!amt.isEmpty()) {
+                                    revenue = Long.parseLong(amt);
+                                    foundReprtCode = reprtCode;
+                                    bsnsYear = "2023";
+                                    System.out.println("[DEBUG] DART 매출액 발견(2023)! (reprt=" + reprtCode + ", fs=" + fsDiv + ")");
+                                 }
+                                 break;
+                              }
+                           }
+                        }
+                     } catch (Exception e) {
+                        // 무시
+                     }
+                  }
+               }
+            }
+            if (revenue == null) System.out.println("[DEBUG] DART 매출액: 모든 보고서/재무제표 조합에서 찾지 못함");
 
             // 💡 2) [DART 기업개황 조회] - 비즈노에서 못 가져오는 전화번호, 팩스, 주소, 홈페이지, 업종을 여기서 확보!
             String dartCompanyUrl = "https://opendart.fss.or.kr/api/company.json?crtfc_key=" + DART_API_KEY
@@ -333,88 +544,113 @@ public class CompanyController {
                System.out.println("DART 기업개황 확인 실패: " + e.getMessage());
             }
 
-            // 💡 3) [DART 직원현황 조회] - 국민연금 대신 DART에서 정확한 년도별 인원수 확보!
-            String dartEmpUrl = "https://opendart.fss.or.kr/api/empSttus.json?crtfc_key=" + DART_API_KEY
-                  + "&corp_code=" + corpCode + "&bsns_year=" + bsnsYear + "&reprt_code=11011";
-            try {
-               ResponseEntity<String> dartEmpRes = restTemplate.getForEntity(dartEmpUrl, String.class);
-               JsonNode dartEmpRoot = objectMapper.readTree(dartEmpRes.getBody());
-               if (dartEmpRoot.has("status") && "000".equals(dartEmpRoot.get("status").asText()) && dartEmpRoot.has("list")) {
-                  int sumAll = 0;
-                  int sumHap = 0;
-                  for (JsonNode empItem : dartEmpRoot.get("list")) {
-                     int rowCount = 0;
-                     if (empItem.hasNonNull("rgllbr_co")) {
-                        String cnt = empItem.get("rgllbr_co").asText().replaceAll(",", "").trim();
-                        if (!cnt.isEmpty() && !"-".equals(cnt))
-                           rowCount += Integer.parseInt(cnt);
-                     }
-                     if (empItem.hasNonNull("cnttk_co")) {
-                        String cnt = empItem.get("cnttk_co").asText().replaceAll(",", "").trim();
-                        if (!cnt.isEmpty() && !"-".equals(cnt))
-                           rowCount += Integer.parseInt(cnt);
-                     }
-                     sumAll += rowCount;
-                     if (empItem.hasNonNull("fo_bbm")) {
-                        String dept = empItem.get("fo_bbm").asText().trim();
-                        if (dept.equals("합계") || dept.equals("총계") || dept.equals("계")) {
-                           sumHap += rowCount;
-                        }
-                     }
-                  }
-                  if (sumHap > 0) employeeCount = sumHap;
-                  else if (sumAll > 0) employeeCount = sumAll;
-               }
-               
-               // 2024년 없으면 2023년 재시도
-               if (employeeCount == null && "2024".equals(bsnsYear)) {
-                  bsnsYear = "2023"; // DART 재시도 시 bsnsYear를 2023으로 변경
-                  String dartEmpUrl2 = "https://opendart.fss.or.kr/api/empSttus.json?crtfc_key=" + DART_API_KEY
-                        + "&corp_code=" + corpCode + "&bsns_year=2023&reprt_code=11011";
-                  ResponseEntity<String> dartEmpRes2 = restTemplate.getForEntity(dartEmpUrl2, String.class);
-                  JsonNode dartEmpRoot2 = objectMapper.readTree(dartEmpRes2.getBody());
-                  if (dartEmpRoot2.has("status") && "000".equals(dartEmpRoot2.get("status").asText()) && dartEmpRoot2.has("list")) {
-                     int sumAll = 0;
-                     int sumHap = 0;
-                     for (JsonNode empItem : dartEmpRoot2.get("list")) {
-                        int rowCount = 0;
-                        if (empItem.hasNonNull("rgllbr_co")) {
-                           String cnt = empItem.get("rgllbr_co").asText().replaceAll(",", "").trim();
-                           if (!cnt.isEmpty() && !"-".equals(cnt))
-                              rowCount += Integer.parseInt(cnt);
-                        }
-                        if (empItem.hasNonNull("cnttk_co")) {
-                           String cnt = empItem.get("cnttk_co").asText().replaceAll(",", "").trim();
-                           if (!cnt.isEmpty() && !"-".equals(cnt))
-                              rowCount += Integer.parseInt(cnt);
-                        }
-                        sumAll += rowCount;
-                        if (empItem.hasNonNull("fo_bbm")) {
-                           String dept = empItem.get("fo_bbm").asText().trim();
-                           if (dept.equals("합계") || dept.equals("총계") || dept.equals("계")) {
-                              sumHap += rowCount;
-                           }
-                        }
-                     }
-                     if (sumHap > 0) employeeCount = sumHap;
-                     else if (sumAll > 0) employeeCount = sumAll;
-                  } else {
-                     bsnsYear = "2024"; // 실패하면 원래 년도로 되돌림
-                  }
-               }
-            } catch (Exception e) {
-               System.out.println("DART 직원현황 확인 실패: " + e.getMessage());
-            }
-         }
+             // 💡 3) [DART 직원현황 조회] - 여러 보고서 코드 순차 시도
+             String empReprtCode = (foundReprtCode != null) ? foundReprtCode : "11011";
+             String[] empReprtCodes = {empReprtCode, "11011", "11012", "11014", "11013"};
+             java.util.Set<String> triedEmpCodes = new java.util.HashSet<>();
+
+             for (String reprtCode : empReprtCodes) {
+                if (employeeCount != null || !triedEmpCodes.add(reprtCode)) continue;
+                String dartEmpUrl = "https://opendart.fss.or.kr/api/empSttus.json?crtfc_key=" + DART_API_KEY
+                      + "&corp_code=" + corpCode + "&bsns_year=" + bsnsYear + "&reprt_code=" + reprtCode;
+                try {
+                   ResponseEntity<String> dartEmpRes = restTemplate.getForEntity(dartEmpUrl, String.class);
+                   JsonNode dartEmpRoot = objectMapper.readTree(dartEmpRes.getBody());
+                   if (dartEmpRoot.has("status") && "000".equals(dartEmpRoot.get("status").asText())
+                         && dartEmpRoot.has("list")) {
+                      int sumAll = 0;
+                      int sumHap = 0;
+                      for (JsonNode empItem : dartEmpRoot.get("list")) {
+                         int rowCount = 0;
+                         if (empItem.hasNonNull("rgllbr_co")) {
+                            String cnt = empItem.get("rgllbr_co").asText().replaceAll(",", "").trim();
+                            if (!cnt.isEmpty() && !"-".equals(cnt))
+                               rowCount += Integer.parseInt(cnt);
+                         }
+                         if (empItem.hasNonNull("cnttk_co")) {
+                            String cnt = empItem.get("cnttk_co").asText().replaceAll(",", "").trim();
+                            if (!cnt.isEmpty() && !"-".equals(cnt))
+                               rowCount += Integer.parseInt(cnt);
+                         }
+                         sumAll += rowCount;
+                         if (empItem.hasNonNull("fo_bbm")) {
+                            String dept = empItem.get("fo_bbm").asText().trim();
+                            if (dept.equals("합계") || dept.equals("총계") || dept.equals("계")) {
+                               sumHap += rowCount;
+                            }
+                         }
+                      }
+                      if (sumHap > 0) employeeCount = sumHap;
+                      else if (sumAll > 0) employeeCount = sumAll;
+                      if (employeeCount != null)
+                         System.out.println("[DEBUG] DART 직원수 발견! (reprt=" + reprtCode + ", 년도=" + bsnsYear + ", 인원=" + employeeCount + ")");
+                   }
+                } catch (Exception e) {
+                   // 개별 실패 무시
+                }
+             }
+
+             // 직원수: 현재 년도 실패 시 이전 년도 재시도
+             if (employeeCount == null) {
+                String fallbackYear = "2024".equals(bsnsYear) ? "2023" : "2024";
+                triedEmpCodes.clear();
+                for (String reprtCode : empReprtCodes) {
+                   if (employeeCount != null || !triedEmpCodes.add(reprtCode)) continue;
+                   String dartEmpUrl = "https://opendart.fss.or.kr/api/empSttus.json?crtfc_key=" + DART_API_KEY
+                         + "&corp_code=" + corpCode + "&bsns_year=" + fallbackYear + "&reprt_code=" + reprtCode;
+                   try {
+                      ResponseEntity<String> dartEmpRes = restTemplate.getForEntity(dartEmpUrl, String.class);
+                      JsonNode dartEmpRoot = objectMapper.readTree(dartEmpRes.getBody());
+                      if (dartEmpRoot.has("status") && "000".equals(dartEmpRoot.get("status").asText())
+                            && dartEmpRoot.has("list")) {
+                         int sumAll = 0;
+                         int sumHap = 0;
+                         for (JsonNode empItem : dartEmpRoot.get("list")) {
+                            int rowCount = 0;
+                            if (empItem.hasNonNull("rgllbr_co")) {
+                               String cnt = empItem.get("rgllbr_co").asText().replaceAll(",", "").trim();
+                               if (!cnt.isEmpty() && !"-".equals(cnt))
+                                  rowCount += Integer.parseInt(cnt);
+                            }
+                            if (empItem.hasNonNull("cnttk_co")) {
+                               String cnt = empItem.get("cnttk_co").asText().replaceAll(",", "").trim();
+                               if (!cnt.isEmpty() && !"-".equals(cnt))
+                                  rowCount += Integer.parseInt(cnt);
+                            }
+                            sumAll += rowCount;
+                            if (empItem.hasNonNull("fo_bbm")) {
+                               String dept = empItem.get("fo_bbm").asText().trim();
+                               if (dept.equals("합계") || dept.equals("총계") || dept.equals("계")) {
+                                  sumHap += rowCount;
+                               }
+                            }
+                         }
+                         if (sumHap > 0) employeeCount = sumHap;
+                         else if (sumAll > 0) employeeCount = sumAll;
+                         if (employeeCount != null) {
+                            bsnsYear = fallbackYear;
+                            System.out.println("[DEBUG] DART 직원수 발견(폴백년도)! (reprt=" + reprtCode + ", 년도=" + fallbackYear + ", 인원=" + employeeCount + ")");
+                         }
+                      }
+                   } catch (Exception e) {
+                      // 무시
+                   }
+                }
+             }
+             if (employeeCount == null) System.out.println("[DEBUG] DART 직원수: 모든 보고서/년도 조합에서 찾지 못함");
+          } else {
+             System.out.println("[DEBUG] DART 고유번호 매핑 실패 - 이 회사는 DART에 등록되지 않음");
+          }
 
          // ====================================================================
          // 2.6 국민연금 (NPS) - DART에 없는 비상장 기업용 백업 (주소/업종 보완)
          // ====================================================================
          try {
             java.net.URI npsUri = new java.net.URI(
-               "https://apis.data.go.kr/B552015/NpsBplcInfoInqireService/getbzowrSttusInfoSearch?serviceKey="
-               + SERVICE_KEY + "&bzowr_rgst_no=" + cleanBizNumber + "&pageNo=1&numOfRows=1&type=json");
+                  "https://apis.data.go.kr/B552015/NpsBplcInfoInqireService/getbzowrSttusInfoSearch?serviceKey="
+                        + SERVICE_KEY + "&bzowr_rgst_no=" + cleanBizNumber + "&pageNo=1&numOfRows=1&type=json");
             ResponseEntity<String> npsRes = restTemplate.getForEntity(npsUri, String.class);
+            System.out.println("[DEBUG] 국민연금 API 응답: " + npsRes.getBody());
             JsonNode npsRoot = objectMapper.readTree(npsRes.getBody());
             if (npsRoot.has("response") && npsRoot.get("response").has("body")) {
                JsonNode bodyNode = npsRoot.get("response").get("body");
@@ -426,20 +662,51 @@ public class CompanyController {
                   else if (itemsNode.isArray() && itemsNode.size() > 0)
                      itemNode = itemsNode.get(0);
                   if (itemNode != null) {
+                     System.out.println("[DEBUG] NPS 데이터 발견: " + itemNode.toString());
                      // DART에서 인원수를 못 가져왔을 때만 NPS 인원수 사용
                      if (employeeCount == null && itemNode.hasNonNull("nps_vld_cnt"))
                         employeeCount = itemNode.get("nps_vld_cnt").asInt();
                      // 주소는 NPS가 더 최신이므로 항상 덮어쓰기
-                     if (itemNode.hasNonNull("addr"))
-                        address = itemNode.get("addr").asText();
-                     if (industry.isEmpty() && itemNode.hasNonNull("bzic_nm"))
-                        industry = itemNode.get("bzic_nm").asText();
+                     if (itemNode.hasNonNull("addr") && !itemNode.get("addr").asText().isBlank())
+                        address = itemNode.get("addr").asText().trim();
+                     if (industry.isEmpty() && itemNode.hasNonNull("bzic_nm")
+                           && !itemNode.get("bzic_nm").asText().isBlank())
+                        industry = itemNode.get("bzic_nm").asText().trim();
+                  } else {
+                     System.out.println("[DEBUG] NPS items는 있지만 item 내부가 비어있음");
                   }
+               } else {
+                  System.out.println("[DEBUG] NPS response.body에 items 없음");
                }
+            } else {
+               System.out.println("[DEBUG] NPS 응답 구조가 예상과 다름");
             }
          } catch (Exception e) {
             System.out.println("국민연금 백업 조회 실패 (무시 가능): " + e.getMessage());
          }
+
+         // ====================================================================
+         // 2.7 고용산재보험 CSV 최종 폴백 (200만 사업장 메모리 데이터)
+         // ====================================================================
+         if (insuranceDataMap.containsKey(cleanBizNumber)) {
+            String[] insData = insuranceDataMap.get(cleanBizNumber);
+            // insData = [근로자수, 주소, 업종명, 사업장명]
+            System.out.println("[DEBUG] 고용산재보험 CSV 매칭! 근로자:" + insData[0] + " 주소:" + insData[1] + " 업종:" + insData[2] + " 사업장:" + insData[3]);
+            if (employeeCount == null && !insData[0].isEmpty()) {
+               try { employeeCount = Integer.parseInt(insData[0]); } catch (Exception e) {}
+            }
+            if (address.isEmpty() && !insData[1].isEmpty())
+               address = insData[1];
+            if (industry.isEmpty() && !insData[2].isEmpty())
+               industry = insData[2];
+            if ("이름미상".equals(realCompanyName) && !insData[3].isEmpty())
+               realCompanyName = insData[3];
+         } else {
+            System.out.println("[DEBUG] 고용산재보험 CSV에 해당 사업자번호 없음: " + cleanBizNumber);
+         }
+
+         System.out.println("[DEBUG] 최종 데이터 -> 회사:" + realCompanyName + " 대표:" + ceo + " 전화:" + phone + " 주소:" + address
+               + " 업종:" + industry + " 매출:" + revenue + " 직원:" + employeeCount);
 
          // 3. 데이터 합치기
          if (ntsRoot.has("data") && ntsRoot.get("data").isArray() && ntsRoot.get("data").size() > 0) {
@@ -475,9 +742,13 @@ public class CompanyController {
 
          // 4. DB에 저장! (사업자번호, 영업상태, 상호명)
          if (!b_stt.isEmpty()) {
-            SearchHistory history = new SearchHistory(bizNumber, b_stt, realCompanyName, phone, email, homepage,
-                  revenue, employeeCount, address, fax, industry);
-            searchHistoryRepository.save(history);
+            try {
+               SearchHistory history = new SearchHistory(bizNumber, b_stt, realCompanyName, phone, email, homepage,
+                     revenue, employeeCount, address, fax, industry);
+               searchHistoryRepository.save(history);
+            } catch (Exception dbError) {
+               System.out.println("⚠️ MongoDB 저장 실패 (데이터 반환에는 영향 없음): " + dbError.getMessage());
+            }
          }
 
          // 5. 프론트엔드로 조작된 전체 데이터 (상호명 포함된 국세청 JSON) 응답 반환
