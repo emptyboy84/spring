@@ -11,4 +11,4 @@ WORKDIR /app
 # 위 1단계에서 만들어진 jar 파일만 쏙 빼옵니다.
 COPY --from=build /app/target/*.jar app.jar
 EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]

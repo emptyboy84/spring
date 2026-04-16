@@ -118,19 +118,39 @@ public class CompanyController {
          conn.setRequestMethod("GET");
          try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(conn.getInputStream())) {
             if (zis.getNextEntry() != null) {
-               javax.xml.parsers.DocumentBuilder db = javax.xml.parsers.DocumentBuilderFactory.newInstance()
-                     .newDocumentBuilder();
-               org.w3c.dom.Document doc = db.parse(zis);
-               org.w3c.dom.NodeList list = doc.getElementsByTagName("list");
-               for (int i = 0; i < list.getLength(); i++) {
-                  org.w3c.dom.Element el = (org.w3c.dom.Element) list.item(i);
-                  String corpCode = el.getElementsByTagName("corp_code").item(0).getTextContent();
-                  org.w3c.dom.Node nameNode = el.getElementsByTagName("corp_name").item(0);
-                  if (nameNode != null) {
-                     String cName = nameNode.getTextContent();
-                     String cleanName = cName.replace("(주)", "").replace("주식회사", "").replace(" ", "").trim();
-                     if (!cleanName.isEmpty())
-                        companyNameToCorpCodeMap.put(cleanName, corpCode);
+               javax.xml.stream.XMLInputFactory factory = javax.xml.stream.XMLInputFactory.newInstance();
+               javax.xml.stream.XMLStreamReader reader = factory.createXMLStreamReader(zis, "UTF-8");
+               
+               String currentElement = "";
+               StringBuilder currentCorpCode = new StringBuilder();
+               StringBuilder currentCorpName = new StringBuilder();
+               
+               while (reader.hasNext()) {
+                  int event = reader.next();
+                  switch (event) {
+                     case javax.xml.stream.XMLStreamConstants.START_ELEMENT:
+                        currentElement = reader.getLocalName();
+                        if ("list".equals(currentElement)) {
+                           currentCorpCode.setLength(0);
+                           currentCorpName.setLength(0);
+                        }
+                        break;
+                     case javax.xml.stream.XMLStreamConstants.CHARACTERS:
+                        if ("corp_code".equals(currentElement)) {
+                           currentCorpCode.append(reader.getText());
+                        } else if ("corp_name".equals(currentElement)) {
+                           currentCorpName.append(reader.getText());
+                        }
+                        break;
+                     case javax.xml.stream.XMLStreamConstants.END_ELEMENT:
+                        if ("list".equals(reader.getLocalName())) {
+                           String cleanName = currentCorpName.toString().replace("(주)", "").replace("주식회사", "").replace(" ", "").trim();
+                           if (!cleanName.isEmpty()) {
+                              companyNameToCorpCodeMap.put(cleanName, currentCorpCode.toString().trim());
+                           }
+                        }
+                        currentElement = "";
+                        break;
                   }
                }
             }
