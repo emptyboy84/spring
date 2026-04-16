@@ -36,9 +36,5 @@ out/
 ### VS Code ###
 .vscode/
 
-### 보안 (API 키 및 DB 비밀번호 유출 방지) ###
-src/main/resources/application.properties
-
-#파일 깃허브에 안올라감
-application.properties
+### 보안 (API 키가 담긴 비밀 파일만 차단 - 깃허브에 절대 올라가면 안 됨) ###
 application-secret.properties

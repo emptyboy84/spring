@@ -451,71 +451,53 @@ public class CompanyController {
             String corpCode = companyNameToCorpCodeMap.get(checkName);
             System.out.println("[DEBUG] DART 고유번호 발견: " + corpCode);
 
-            // 💰 1) [DART 매출액 조회] - 사업보고서 → 반기 → 분기 순 폴백, CFS → OFS 폴백
+            // 💰 1) [DART 매출액 조회] - 다양한 계정명 + 보고서/재무제표/연도별 전방위 검색
             String[] reprtCodes = {"11011", "11012", "11014", "11013"}; // 사업보고서, 반기, 3분기, 1분기
             String[] fsDivs = {"CFS", "OFS"}; // 연결재무제표 → 별도재무제표
+            // 업종마다 매출을 나타내는 계정명이 다름 (제조업=매출액, 금융=영업수익, 보험=보험료수익 등)
+            java.util.Set<String> revenueAccountNames = new java.util.LinkedHashSet<>(java.util.Arrays.asList(
+                  "매출액", "영업수익", "수익(매출액)", "매출", "순매출액",
+                  "보험료수익", "이자수익", "영업수익(매출액)", "순영업수익"));
             String foundReprtCode = null; // 성공한 보고서 코드 기억용
+            String[] yearsToTry = {"2024", "2023", "2022"};
 
-            for (String reprtCode : reprtCodes) {
+            for (String year : yearsToTry) {
                if (revenue != null) break;
-               for (String fsDiv : fsDivs) {
-                  if (revenue != null) break;
-                  String dartFnUrl = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=" + DART_API_KEY
-                        + "&corp_code=" + corpCode + "&bsns_year=" + bsnsYear + "&reprt_code=" + reprtCode + "&fs_div=" + fsDiv;
-                  try {
-                     ResponseEntity<String> dartRes = restTemplate.getForEntity(dartFnUrl, String.class);
-                     JsonNode dartRoot = objectMapper.readTree(dartRes.getBody());
-                     if (dartRoot.has("status") && "000".equals(dartRoot.get("status").asText()) && dartRoot.has("list")) {
-                        for (JsonNode item : dartRoot.get("list")) {
-                           if ("매출액".equals(item.get("account_nm").asText())) {
-                              String amt = item.get("thstrm_amount").asText().replaceAll(",", "");
-                              if (!amt.isEmpty()) {
-                                 revenue = Long.parseLong(amt);
-                                 foundReprtCode = reprtCode;
-                                 System.out.println("[DEBUG] DART 매출액 발견! (reprt=" + reprtCode + ", fs=" + fsDiv + ", 년도=" + bsnsYear + ")");
-                              }
-                              break;
-                           }
-                        }
-                     }
-                  } catch (Exception e) {
-                     // 개별 조합 실패는 무시하고 다음 조합 시도
-                  }
-               }
-            }
-
-            // 2024년 매출액 없으면 2023년으로 한번 더 시도
-            if (revenue == null && "2024".equals(bsnsYear)) {
                for (String reprtCode : reprtCodes) {
                   if (revenue != null) break;
                   for (String fsDiv : fsDivs) {
                      if (revenue != null) break;
                      String dartFnUrl = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=" + DART_API_KEY
-                           + "&corp_code=" + corpCode + "&bsns_year=2023&reprt_code=" + reprtCode + "&fs_div=" + fsDiv;
+                           + "&corp_code=" + corpCode + "&bsns_year=" + year + "&reprt_code=" + reprtCode + "&fs_div=" + fsDiv;
                      try {
                         ResponseEntity<String> dartRes = restTemplate.getForEntity(dartFnUrl, String.class);
                         JsonNode dartRoot = objectMapper.readTree(dartRes.getBody());
                         if (dartRoot.has("status") && "000".equals(dartRoot.get("status").asText()) && dartRoot.has("list")) {
                            for (JsonNode item : dartRoot.get("list")) {
-                              if ("매출액".equals(item.get("account_nm").asText())) {
-                                 String amt = item.get("thstrm_amount").asText().replaceAll(",", "");
-                                 if (!amt.isEmpty()) {
-                                    revenue = Long.parseLong(amt);
-                                    foundReprtCode = reprtCode;
-                                    bsnsYear = "2023";
-                                    System.out.println("[DEBUG] DART 매출액 발견(2023)! (reprt=" + reprtCode + ", fs=" + fsDiv + ")");
+                              String acctNm = item.has("account_nm") ? item.get("account_nm").asText().trim() : "";
+                              if (revenueAccountNames.contains(acctNm)) {
+                                 String amt = item.has("thstrm_amount") ? item.get("thstrm_amount").asText().replaceAll(",", "").trim() : "";
+                                 if (!amt.isEmpty() && !"-".equals(amt)) {
+                                    try {
+                                       revenue = Long.parseLong(amt);
+                                       foundReprtCode = reprtCode;
+                                       bsnsYear = year;
+                                       System.out.println("[DEBUG] DART 매출액 발견! 계정명=" + acctNm + " (reprt=" + reprtCode + ", fs=" + fsDiv + ", 년도=" + year + ")");
+                                    } catch (NumberFormatException nfe) {
+                                       System.out.println("[DEBUG] DART 매출액 숫자변환 실패: '" + amt + "'");
+                                    }
                                  }
                                  break;
                               }
                            }
                         }
                      } catch (Exception e) {
-                        // 무시
+                        // 개별 조합 실패는 무시하고 다음 조합 시도
                      }
                   }
                }
             }
-            if (revenue == null) System.out.println("[DEBUG] DART 매출액: 모든 보고서/재무제표 조합에서 찾지 못함");
+            if (revenue == null) System.out.println("[DEBUG] DART 매출액: 모든 계정명/보고서/재무제표/연도 조합에서 찾지 못함");
 
             // 💡 2) [DART 기업개황 조회] - 비즈노에서 못 가져오는 전화번호, 팩스, 주소, 홈페이지, 업종을 여기서 확보!
             String dartCompanyUrl = "https://opendart.fss.or.kr/api/company.json?crtfc_key=" + DART_API_KEY
