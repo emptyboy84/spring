@@ -51,11 +51,8 @@ export default function Home() {
 
       // 회사명만 있으면 검색 목록 조회
       try {
-         //const url = `http://localhost:8080/api/company/search?q=${encodeURIComponent(companyName)}`;
          const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-         const response = await fetch(`${API_URL}/api/company/status?bizNumber=${bizNumber}`);
-
-         //const response = await fetch(url);
+         const response = await fetch(`${API_URL}/api/company/search?q=${encodeURIComponent(companyName)}`);
          const data = await response.json();
 
          setSearchQuery(companyName);
@@ -77,7 +74,8 @@ export default function Home() {
    const fetchDetail = async (bno: string, name: string) => {
       setIsLoading(true);
       try {
-         const url = new URL("http://localhost:8080/api/company/status");
+         const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+         const url = new URL(`${API_URL}/api/company/status`);
          url.searchParams.append("bizNumber", bno);
 
          const response = await fetch(url.toString());
